@@ -7,3 +7,5 @@ f5-tts_infer-cli \
 --vocoder_name vocos \
 --vocab_file model/vocab.txt \
 --ckpt_file model/model_last.pt \
+--output_dir "output" \
+--output_file "huan_rose_trimmed_output.wav"
