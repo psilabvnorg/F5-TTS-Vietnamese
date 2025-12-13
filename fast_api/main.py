@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from fastapi import Request, Depends
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -18,7 +19,12 @@ import json
 import re
 import asyncio
 from typing import AsyncGenerator
-from glob import glob
+from middleware.rate_limiter_redis import RedisRateLimiter
+
+rate_limiter = RedisRateLimiter()
+
+async def get_session_id(request: Request):
+    return rate_limiter.get_session_id(request)
 
 app = FastAPI(title="F5-TTS Vietnamese API", version="1.0.0")
 
@@ -298,7 +304,7 @@ def get_voice_detail(voice_id: str):
 
 
 @app.post("/synthesize")
-def synthesize(request: TTSRequest):
+def synthesize(request: TTSRequest, session_id: str = Depends(get_session_id)):
     """
     Synthesize speech from text
     
@@ -310,6 +316,9 @@ def synthesize(request: TTSRequest):
         "output_file": "output.wav"
     }
     """
+    # Rate limit for anonymous sessions
+    rate_info = rate_limiter.check(session_id, len(request.text))
+
     # Validate voice
     if request.voice not in VOICES:
         raise HTTPException(
@@ -356,13 +365,19 @@ def synthesize(request: TTSRequest):
             text=True
         )
         
-        return {
+        response = {
             "status": "success",
             "voice": request.voice,
             "text": request.text,
             "output_file": str(output_path),
             "message": "Speech synthesized successfully"
         }
+        headers = {
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Remaining": str(rate_info["remaining"]),
+            "X-RateLimit-Reset": rate_info["reset_iso"]
+        }
+        return JSONResponse(content=response, headers=headers)
         
     except subprocess.CalledProcessError as e:
         raise HTTPException(
@@ -383,7 +398,8 @@ async def tts_generate_audio(
     speed: float = Query(1.0),
     remove_silence: bool = Query(False),
     cfg_strength: float = Query(2.0),
-    nfe_step: int = Query(32)
+    nfe_step: int = Query(32),
+    session_id: str = Depends(get_session_id)
 ):
     """
     Generate speech with Server-Sent Events (SSE) for real-time progress updates.
@@ -399,6 +415,9 @@ async def tts_generate_audio(
         raise HTTPException(status_code=400, detail="Speed must be between 0.5 and 2.0")
     if not (1.0 <= cfg_strength <= 5.0):
         raise HTTPException(status_code=400, detail="cfg_strength must be between 1.0 and 5.0")
+    
+    # Apply Redis-backed rate limiting
+    rate_info = rate_limiter.check(session_id, len(text))
     
     voice_config = VOICES[voice_id]
     ref_audio_path = REF_AUDIO_DIR / voice_config["audio"]
@@ -518,7 +537,12 @@ async def tts_generate_audio(
         except Exception as e:
             yield f"data: {json.dumps({'progress': 0, 'status_key': 'error', 'error': str(e)})}\n\n"
     
-    return StreamingResponse(generate_progress(), media_type="text/event-stream")
+    headers = {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Remaining": str(rate_info["remaining"]),
+        "X-RateLimit-Reset": rate_info["reset_iso"]
+    }
+    return StreamingResponse(generate_progress(), media_type="text/event-stream", headers=headers)
 
 
 # Mount static files for frontend

@@ -18,6 +18,8 @@
   const progressPercent = document.getElementById('progress-percent');
   const progressBar = document.getElementById('progress-bar');
   const progressText = document.getElementById('progress-text');
+  // Track remaining rate limit across SSE lifecycle
+  let remainingLimit = null;
 
   function showLoadingModal() {
     resetLoadingModal();
@@ -315,6 +317,25 @@
             setMessage(errorMsg, 'error');
             generateBtn.disabled = false;
             return;
+          }
+
+          // Check rate limit info from initial payload
+          if (data.rate_limit && typeof data.rate_limit.remaining !== 'undefined') {
+            if (parseInt(data.rate_limit.remaining) <= 0) {
+              // Inform user and stop further processing
+              eventSource.close();
+              hideLoadingModal();
+              setMessage('Số lượt tạo audio của bạn đã quá 5 lần. Hãy login để có thể tạo thêm file audio.', 'error');
+              generateBtn.disabled = false;
+              return;
+            }
+            // Store remaining limit for later display in completion message
+            remainingLimit = parseInt(data.rate_limit.remaining);
+            // Inform user about remaining limit if still available
+            const remaining_limit = parseInt(data.rate_limit.remaining);
+            if (remaining_limit > 0) {
+              setMessage(`Số lượt tạo audio của bạn còn ${remaining_limit}`, 'info');
+            }
           }
           
           // Translate status message if status_key is provided
