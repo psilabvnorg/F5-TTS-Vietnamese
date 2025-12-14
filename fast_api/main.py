@@ -5,7 +5,7 @@ Simple FastAPI server for F5-TTS Vietnamese inference
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import subprocess
@@ -217,10 +217,12 @@ class TTSRequest(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {
-        "message": "F5-TTS Vietnamese API",
-        "available_voices": list(VOICES.keys())
-    }
+    """Serve the frontend at root path."""
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    # Fallback: redirect to static path
+    return RedirectResponse(url="/static/index.html")
 
 
 @app.get("/healthz")
