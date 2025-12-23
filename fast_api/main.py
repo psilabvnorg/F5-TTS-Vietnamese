@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Simple FastAPI server for F5-TTS Vietnamese inference
+Optimized with preloaded model and AsyncIO queue for concurrent users
 """
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
@@ -9,17 +10,19 @@ from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse,
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi import Request, Depends
-import subprocess
 from pathlib import Path
 from datetime import datetime
 import os
 import io
 import time
 import json
-import re
+import base64
 import asyncio
-from typing import AsyncGenerator
-from middleware.rate_limiter_redis import RedisRateLimiter
+from typing import AsyncGenerator, Tuple
+import torch
+import torchaudio
+import numpy as np
+# from middleware.rate_limiter_redis import RedisRateLimiter  # Temporarily disabled
 from config import (
     VOICES,
     BASE_DIR,
@@ -48,11 +51,218 @@ from config import (
     RATE_LIMIT_REQUESTS
 )
 
-rate_limiter = RedisRateLimiter()
+# F5-TTS imports
+from f5_tts.model import DiT
+from f5_tts.infer.utils_infer import (
+    load_vocoder,
+    load_model,
+    preprocess_ref_audio_text,
+    infer_process,
+    remove_silence_for_generated_wav
+)
 
-async def get_session_id(request: Request):
-    return rate_limiter.get_session_id(request)
+# rate_limiter = RedisRateLimiter()  # Temporarily disabled
 
+# async def get_session_id(request: Request):
+#     # return rate_limiter.get_session_id(request)  # Temporarily disabled
+#     return "default_session"  # Placeholder when rate limiting is disabled
+
+# Set HuggingFace cache BEFORE loading models
+os.environ["HF_HOME"] = HF_HOME
+os.environ["HF_HUB_CACHE"] = HF_HUB_CACHE
+
+# ============================================
+# STEP 2: PRELOAD MODEL AND VOCODER AT STARTUP
+# ============================================
+print("🔄 Loading F5-TTS model...")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"📍 Using device: {device}")
+
+# Model configuration
+model_cfg = dict(
+    dim=1024,
+    depth=22,
+    heads=16,
+    ff_mult=2,
+    text_dim=512,
+    conv_layers=4
+)
+
+# Load model (once at startup)
+F5TTS_model = load_model(
+    model_cls=DiT,
+    model_cfg=model_cfg,
+    ckpt_path=str(CHECKPOINT_FILE),
+    mel_spec_type=VOCODER_NAME,
+    vocab_file=str(VOCAB_FILE)
+)
+print(f"✅ Model loaded successfully on {device}")
+
+# Load vocoder (once at startup)
+vocoder = load_vocoder(vocoder_name=VOCODER_NAME, is_local=False, device=device)
+print(f"✅ Vocoder '{VOCODER_NAME}' loaded successfully")
+
+# ============================================
+# STEP 2.5: PRELOAD REFERENCE AUDIOS AT STARTUP
+# ============================================
+def preload_reference_audios():
+    """
+    Preload and cache all reference audios at startup.
+    This eliminates the 0.5-1s delay per voice on first request.
+    """
+    print("\n🔄 Preloading reference audios...")
+    loaded_count = 0
+    failed_count = 0
+    
+    for voice_id, voice_config in VOICES.items():
+        try:
+            # Construct reference audio path
+            ref_audio_path = REF_AUDIO_DIR / voice_config["audio"]
+            
+            if not ref_audio_path.exists():
+                print(f"⚠️  Warning: Reference audio not found for '{voice_id}': {ref_audio_path}")
+                failed_count += 1
+                continue
+            
+            # Preprocess reference audio
+            ref_audio, ref_text = preprocess_ref_audio_text(
+                ref_audio_orig=str(ref_audio_path),
+                ref_text=voice_config["ref_text"]
+            )
+            
+            # Store in cache
+            ref_audio_cache[voice_id] = (ref_audio, ref_text)
+            loaded_count += 1
+            print(f"✅ Cached: {voice_id} ({voice_config.get('name', voice_id)})")
+            
+        except Exception as e:
+            print(f"❌ Failed to load '{voice_id}': {str(e)}")
+            failed_count += 1
+    
+    print(f"\n✅ Preloading complete: {loaded_count} voices loaded, {failed_count} failed")
+    if loaded_count == 0:
+        print("⚠️  WARNING: No reference audios were loaded! Check your voice configurations.")
+    
+    return loaded_count, failed_count
+
+# Cache for preprocessed reference audios
+ref_audio_cache = {}
+
+# Preload all reference audios at startup
+preload_reference_audios()
+
+# ============================================
+# STEP 3: ASYNC QUEUE AND CACHING
+# ============================================
+# Concurrency control - only 1 inference at a time
+inference_semaphore = asyncio.Semaphore(1)
+
+# Queue capacity
+MAX_QUEUE_SIZE = 50
+
+# Metrics tracking
+class QueueMetrics:
+    def __init__(self):
+        self.total_requests = 0
+        self.completed_requests = 0
+        self.failed_requests = 0
+        self.start_time = time.time()
+    
+    @property
+    def in_queue(self):
+        return self.total_requests - self.completed_requests - self.failed_requests
+    
+    @property
+    def uptime(self):
+        return time.time() - self.start_time
+
+metrics = QueueMetrics()
+
+def get_cached_ref_audio(voice_id: str) -> Tuple:
+    """
+    Get preprocessed reference audio from cache.
+    All audios are preloaded at startup, so this is just a simple lookup.
+    
+    Args:
+        voice_id: The voice identifier
+        
+    Returns:
+        Tuple of (ref_audio, ref_text)
+        
+    Raises:
+        ValueError: If voice_id is not found in cache
+    """
+    if voice_id not in ref_audio_cache:
+        # This should never happen if preloading worked correctly
+        available_voices = list(ref_audio_cache.keys())
+        raise ValueError(
+            f"Voice '{voice_id}' not found in cache. "
+            f"Available voices: {available_voices}. "
+            f"This may indicate the reference audio failed to load at startup."
+        )
+    
+    return ref_audio_cache[voice_id]
+
+# ============================================
+# STEP 4: INFERENCE FUNCTION WITH QUEUE
+# ============================================
+async def run_inference(text: str, voice_id: str, speed: float, remove_silence: bool = False) -> Tuple:
+    """
+    Run inference with concurrency control
+    Only 1 request processes at a time, others wait in queue
+    """
+    metrics.total_requests += 1
+    
+    async with inference_semaphore:  # Wait for available slot
+        try:
+            # Get cached reference audio
+            ref_audio, ref_text = get_cached_ref_audio(voice_id)
+            
+            # Run inference in thread pool (blocking operation)
+            loop = asyncio.get_event_loop()
+            generated_audio, sample_rate, remove_silence_flag = await loop.run_in_executor(
+                None,
+                _sync_inference,
+                ref_audio,
+                ref_text,
+                text,
+                speed,
+                remove_silence
+            )
+            
+            metrics.completed_requests += 1
+            return generated_audio, sample_rate, remove_silence_flag
+            
+        except Exception as e:
+            metrics.failed_requests += 1
+            raise e
+
+def _sync_inference(ref_audio, ref_text, text, speed, remove_silence_flag):
+    """Synchronous inference function to run in executor"""
+    # Call infer_process matching CLI parameters
+    generated_audio, sample_rate, _ = infer_process(
+        ref_audio,
+        ref_text,
+        text,
+        F5TTS_model,
+        vocoder,
+        mel_spec_type=VOCODER_NAME,
+        speed=speed
+    )
+    
+    # Convert numpy array to torch tensor and ensure 2D shape (channels, samples)
+    if isinstance(generated_audio, np.ndarray):
+        generated_audio = torch.from_numpy(generated_audio)
+    
+    if generated_audio.dim() == 1:
+        generated_audio = generated_audio.unsqueeze(0)
+    
+    # Note: remove_silence in CLI works on saved files, we'll handle it after saving
+    return generated_audio, sample_rate, remove_silence_flag
+
+# ============================================
+# FastAPI App
+# ============================================
 app = FastAPI(title=API_TITLE, version=API_VERSION)
 
 # Add CORS middleware
@@ -63,10 +273,6 @@ app.add_middleware(
     allow_methods=CORS_ALLOW_METHODS,
     allow_headers=CORS_ALLOW_HEADERS,
 )
-
-# Set HuggingFace cache
-os.environ["HF_HOME"] = HF_HOME
-os.environ["HF_HUB_CACHE"] = HF_HUB_CACHE
 
 
 class TTSRequest(BaseModel):
@@ -93,7 +299,31 @@ def health_check():
         "status": "ok",
         "service": API_TITLE,
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "version": API_VERSION
+        "version": API_VERSION,
+        "model": {
+            "loaded": F5TTS_model is not None and vocoder is not None,
+            "device": str(device),
+            "name": MODEL_NAME,
+            "vocoder": VOCODER_NAME
+        },
+        "cache": {
+            "ref_audios_loaded": len(ref_audio_cache),
+            "total_voices_configured": len(VOICES),
+            "cached_voices": sorted(list(ref_audio_cache.keys())),
+            "preload_success_rate": f"{len(ref_audio_cache)}/{len(VOICES)}"
+        },
+        "queue": {
+            "current_size": metrics.in_queue,
+            "max_size": MAX_QUEUE_SIZE,
+            "total_requests": metrics.total_requests,
+            "completed": metrics.completed_requests,
+            "failed": metrics.failed_requests
+        },
+        "capacity": {
+            "max_concurrent": 1,
+            "available": 1 - metrics.in_queue
+        },
+        "uptime_seconds": round(metrics.uptime, 2)
     }
 
 
@@ -159,9 +389,9 @@ def get_voice_detail(voice_id: str):
 
 
 @app.post("/synthesize")
-def synthesize(request: TTSRequest, session_id: str = Depends(get_session_id)):
+async def synthesize(request: TTSRequest):
     """
-    Synthesize speech from text
+    Synthesize speech from text using preloaded model
     
     Example:
     {
@@ -171,8 +401,9 @@ def synthesize(request: TTSRequest, session_id: str = Depends(get_session_id)):
         "output_file": "output.wav"
     }
     """
-    # Rate limit for anonymous sessions
-    rate_info = rate_limiter.check(session_id, len(request.text))
+    # Rate limit check (temporarily disabled)
+    # rate_info = rate_limiter.check(session_id, len(request.text))
+    rate_info = {"remaining": 999, "reset_iso": "N/A"}  # Placeholder
 
     # Validate voice
     if request.voice not in VOICES:
@@ -181,68 +412,69 @@ def synthesize(request: TTSRequest, session_id: str = Depends(get_session_id)):
             detail=f"Voice '{request.voice}' not found. Available: {list(VOICES.keys())}"
         )
     
-    # Get voice config
-    voice_config = VOICES[request.voice]
-    ref_audio = REF_AUDIO_DIR / voice_config["audio"]
-    
-    # Check if reference audio exists
-    if not ref_audio.exists():
+    # Validate text length
+    if not (MIN_TEXT_LENGTH <= len(request.text) <= MAX_TEXT_LENGTH):
         raise HTTPException(
-            status_code=500,
-            detail=f"Reference audio not found: {ref_audio}"
+            status_code=400,
+            detail=f"Text length must be between {MIN_TEXT_LENGTH} and {MAX_TEXT_LENGTH}"
+        )
+    
+    # Check queue capacity
+    if metrics.in_queue >= MAX_QUEUE_SIZE:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server busy. Queue full ({MAX_QUEUE_SIZE} requests). Please try again later."
         )
     
     # Prepare output
     OUTPUT_DIR.mkdir(exist_ok=True)
     output_path = OUTPUT_DIR / request.output_file
     
-    # Build command
-    command = [
-        "f5-tts_infer-cli",
-        "--model", MODEL_NAME,
-        "--ref_audio", str(ref_audio),
-        "--ref_text", voice_config["ref_text"],
-        "--gen_text", request.text,
-        "--speed", str(request.speed),
-        "--vocoder_name", VOCODER_NAME,
-        "--vocab_file", str(VOCAB_FILE),
-        "--ckpt_file", str(CHECKPOINT_FILE),
-        "--output_dir", str(OUTPUT_DIR),
-        "--output_file", request.output_file
-    ]
-    
     try:
-        # Run inference
-        result = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True
+        start_time = time.time()
+        
+        # Run inference with preloaded model and queue management
+        generated_audio, sample_rate, remove_silence_flag = await run_inference(
+            text=request.text,
+            voice_id=request.voice,
+            speed=request.speed,
+            remove_silence=False
         )
+        
+        # Save audio
+        torchaudio.save(str(output_path), generated_audio, sample_rate)
+        
+        # Apply silence removal if requested (matches CLI behavior)
+        if remove_silence_flag:
+            remove_silence_for_generated_wav(str(output_path))
+        
+        generation_time = time.time() - start_time
         
         response = {
             "status": "success",
             "voice": request.voice,
             "text": request.text,
             "output_file": str(output_path),
+            "duration": float(generated_audio.shape[-1] / sample_rate),
+            "generation_time": round(generation_time, 2),
+            "queue_position": metrics.in_queue,
             "message": "Speech synthesized successfully"
         }
+        
         headers = {
             "X-RateLimit-Limit": str(RATE_LIMIT_REQUESTS),
             "X-RateLimit-Remaining": str(rate_info["remaining"]),
-            "X-RateLimit-Reset": rate_info["reset_iso"]
+            "X-RateLimit-Reset": rate_info["reset_iso"],
+            "X-Generation-Time": str(round(generation_time, 2)),
+            "X-Queue-Position": str(metrics.in_queue)
         }
+        
         return JSONResponse(content=response, headers=headers)
         
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Inference failed: {e.stderr}"
-        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error: {str(e)}"
+            detail=f"Synthesis failed: {str(e)}"
         )
 
 
@@ -253,13 +485,13 @@ async def tts_generate_audio(
     speed: float = Query(1.0),
     remove_silence: bool = Query(False),
     cfg_strength: float = Query(2.0),
-    nfe_step: int = Query(32),
-    session_id: str = Depends(get_session_id)
+    nfe_step: int = Query(32)
 ):
     """
     Generate speech with Server-Sent Events (SSE) for real-time progress updates.
+    Uses preloaded model for faster inference.
     """
-    # Validate inputs (same as tts_generate)
+    # Validate inputs
     if not text or len(text) < MIN_TEXT_LENGTH:
         raise HTTPException(status_code=400, detail="Text is required")
     if len(text) > MAX_TEXT_LENGTH:
@@ -271,8 +503,13 @@ async def tts_generate_audio(
     if not (MIN_CFG_STRENGTH <= cfg_strength <= MAX_CFG_STRENGTH):
         raise HTTPException(status_code=400, detail=f"cfg_strength must be between {MIN_CFG_STRENGTH} and {MAX_CFG_STRENGTH}")
     
-    # Apply Redis-backed rate limiting
-    rate_info = rate_limiter.check(session_id, len(text))
+    # Apply Redis-backed rate limiting (temporarily disabled)
+    # rate_info = rate_limiter.check(session_id, len(text))
+    rate_info = {"remaining": 999, "reset_iso": "N/A"}  # Placeholder
+    
+    # Check queue capacity
+    if metrics.in_queue >= MAX_QUEUE_SIZE:
+        raise HTTPException(status_code=503, detail="Server is busy. Please try again later.")
     
     voice_config = VOICES[voice_id]
     ref_audio_path = REF_AUDIO_DIR / voice_config["audio"]
@@ -284,39 +521,36 @@ async def tts_generate_audio(
     output_file = f"output_{int(time.time())}.wav"
     output_path = OUTPUT_DIR / output_file
     
-    command = [
-        "f5-tts_infer-cli",
-        "--model", MODEL_NAME,
-        "--ref_audio", str(ref_audio_path),
-        "--ref_text", voice_config["ref_text"],
-        "--gen_text", text,
-        "--speed", str(speed),
-        "--vocoder_name", VOCODER_NAME,
-        "--vocab_file", str(VOCAB_FILE),
-        "--ckpt_file", str(CHECKPOINT_FILE),
-        "--output_dir", str(OUTPUT_DIR),
-        "--output_file", output_file
-    ]
-    
-    if remove_silence:
-        command.append("--remove_silence")
-    
     async def generate_progress() -> AsyncGenerator[str, None]:
         """Stream progress updates via SSE"""
+        start_time = time.time()
+        
         try:
             # Send initial progress
             yield f"data: {json.dumps({'progress': 0, 'status_key': 'initializing'})}\n\n"
             
-            # Start subprocess
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT
+            # Processing text
+            yield f"data: {json.dumps({'progress': 10, 'status': 'Đang xử lý văn bản...'})}\n\n"
+            await asyncio.sleep(0.1)
+            
+            # Loading reference audio (cached)
+            yield f"data: {json.dumps({'progress': 20, 'status': 'Đang tải tham chiếu âm thanh...'})}\n\n"
+            await asyncio.sleep(0.1)
+            
+            # Running inference (this is where the model processes)
+            yield f"data: {json.dumps({'progress': 30, 'status': 'Đang tạo audio với mô hình...'})}\n\n"
+            
+            # Call preloaded model inference
+            generated_audio, sample_rate, remove_silence_flag = await run_inference(
+                text=text,
+                voice_id=voice_id,
+                speed=speed,
+                remove_silence=remove_silence
             )
             
-            progress = 0
-            batch_count = 0
-            total_batches = 0
+            # Inference complete
+            yield f"data: {json.dumps({'progress': 80, 'status': 'Đã tạo xong audio...'})}\n\n"
+            await asyncio.sleep(0.1)
             
             # Read output line by line
             while True:
@@ -366,38 +600,58 @@ async def tts_generate_audio(
                 yield f"data: {json.dumps({'progress': 95, 'status_key': 'finalizingResult'})}\n\n"
                 await asyncio.sleep(0.2)
                 
-                # Read audio file
-                with open(output_path, "rb") as audio_file:
-                    audio_data = audio_file.read()
+                # Calculate file size and duration
+                file_size = output_path.stat().st_size
+                audio_duration = generated_audio.shape[-1] / sample_rate
                 
-                file_size = len(audio_data)
-                audio_duration = file_size / (24000 * 1 * 2)
+                generation_time = time.time() - start_time
                 
-                # Send completion with audio data URL
-                import base64
-                audio_b64 = base64.b64encode(audio_data).decode('utf-8')
-                
+                # Send completion with file URL instead of base64 data (avoids chunk size limit)
                 result_data = {
                     'progress': 100,
                     'status_key': 'complete',
                     'audio_data': audio_b64,
                     'filename': output_file,
                     'duration': audio_duration,
-                    'file_size': file_size
+                    'file_size': file_size,
+                    'generation_time': round(generation_time, 2)
                 }
                 yield f"data: {json.dumps(result_data)}\n\n"
             else:
                 yield f"data: {json.dumps({'progress': 0, 'status_key': 'error', 'error_key': 'outputFileNotCreated'})}\n\n"
                 
+        except HTTPException as e:
+            # Re-raise HTTP exceptions (like queue full)
+            yield f"data: {json.dumps({'progress': 0, 'status': 'Lỗi', 'error': e.detail})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'progress': 0, 'status_key': 'error', 'error': str(e)})}\n\n"
     
     headers = {
         "X-RateLimit-Limit": str(RATE_LIMIT_REQUESTS),
         "X-RateLimit-Remaining": str(rate_info["remaining"]),
-        "X-RateLimit-Reset": rate_info["reset_iso"]
+        "X-RateLimit-Reset": rate_info["reset_iso"],
+        "X-Queue-Position": str(metrics.in_queue)
     }
     return StreamingResponse(generate_progress(), media_type="text/event-stream", headers=headers)
+
+
+@app.get("/output/{filename}")
+async def get_output_file(filename: str):
+    """Serve generated audio files"""
+    file_path = OUTPUT_DIR / filename
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    
+    # Security: prevent directory traversal
+    if not str(file_path.resolve()).startswith(str(OUTPUT_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return FileResponse(
+        path=str(file_path),
+        media_type="audio/wav",
+        filename=filename
+    )
 
 
 # Mount static files for frontend

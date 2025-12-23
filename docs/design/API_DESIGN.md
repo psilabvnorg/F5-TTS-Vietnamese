@@ -660,6 +660,417 @@ curl -X GET "http://localhost:8000jobs/job_abc123xyz/download" \
 
 ---
 
+## Concurrency & Scaling Strategy
+
+### Hardware Context
+**Target Deployment:**
+- 1x RTX 3060 with 16GB VRAM
+- Local workstation (PoC phase)
+- Expected load: ~10 concurrent users
+
+**F5-TTS Model Memory Requirements:**
+- Model weights: ~2-3GB VRAM
+- Vocoder: ~500MB VRAM
+- Per-inference working memory: ~1-2GB VRAM
+- **Total base load:** ~3.5GB VRAM
+
+---
+
+### Approach Comparison
+
+#### **Option 1: AsyncIO + Queue (RECOMMENDED for PoC ✅)**
+
+**Architecture:**
+```
+FastAPI → AsyncIO Queue → Single Model → Response
+```
+
+**How it works:**
+- Single model loaded once in GPU memory
+- Requests queued using asyncio.Queue
+- Processed sequentially with async/await
+- Simple semaphore/lock prevents concurrent GPU access
+
+**Pros:**
+- ✅ Simple to implement (50 lines of code)
+- ✅ Minimal VRAM usage (~4GB total)
+- ✅ No external dependencies
+- ✅ Perfect for PoC validation
+- ✅ Handles 10 users gracefully with queuing
+- ✅ Easy to debug and maintain
+- ✅ 1 hour implementation time
+
+**Cons:**
+- ❌ Sequential processing (one request at a time)
+- ❌ Limited scalability beyond 20 concurrent users
+- ❌ Not optimal for production at scale
+
+**Expected Performance:**
+- Per request: 2-5 seconds
+- Throughput: 12-20 requests/minute
+- With 10 concurrent users:
+  - Average wait: ~15 seconds
+  - Worst case (10th user): ~30 seconds
+- This is acceptable for PoC with SSE progress updates
+
+**Implementation Complexity:** Low (1 hour)
+
+---
+
+#### **Option 2: Ray Serve with Multiple Replicas**
+
+**Architecture:**
+```
+Load Balancer → [Replica 1, Replica 2, Replica 3] → Responses
+```
+
+**How it works:**
+- 2-3 model replicas on same GPU
+- Each replica uses ~4GB VRAM
+- Ray's load balancer distributes requests
+- True parallel processing
+
+**Pros:**
+- ✅ True parallelism (2-3 concurrent inferences)
+- ✅ Professional, production-grade architecture
+- ✅ Built-in load balancing and monitoring
+- ✅ Easy to scale horizontally
+- ✅ Handles failures gracefully
+
+**Cons:**
+- ❌ VRAM intensive (8-12GB for 2-3 replicas)
+- ❌ Requires Ray installation and setup
+- ❌ Overkill for PoC phase
+- ❌ More complex debugging
+- ❌ 4-6 hours implementation time
+
+**Expected Performance:**
+- 2-3 requests processed simultaneously
+- Throughput: 24-45 requests/minute
+- With 10 concurrent users:
+  - Average wait: ~5 seconds
+  - Worst case: ~10 seconds
+
+**VRAM Usage:** 8-12GB (may not fit on RTX 3060)
+
+**Implementation Complexity:** Medium (4-6 hours)
+
+---
+
+#### **Option 3: Celery + Redis + Workers**
+
+**Architecture:**
+```
+FastAPI → Redis Queue → [Worker 1, Worker 2] → Results → FastAPI
+```
+
+**How it works:**
+- Redis manages distributed task queue
+- Multiple Celery workers process tasks
+- 2 workers sharing GPU sequentially
+- Background job processing
+
+**Pros:**
+- ✅ Good for long-running, async tasks
+- ✅ Task persistence and retry logic
+- ✅ Can scale to multiple machines
+- ✅ Familiar pattern for many developers
+- ✅ Good monitoring tools
+
+**Cons:**
+- ❌ Requires Redis infrastructure
+- ❌ More complex setup and deployment
+- ❌ Overkill for local PoC
+- ❌ Workers still process sequentially per GPU
+- ❌ 6-8 hours implementation time
+
+**Expected Performance:**
+- 2 workers processing sequentially
+- Throughput: 20-30 requests/minute
+- With 10 concurrent users:
+  - Average wait: ~10 seconds
+  - Jobs queued in Redis
+
+**VRAM Usage:** 8GB (2 workers × 4GB)
+
+**Implementation Complexity:** High (6-8 hours)
+
+---
+
+#### **Option 4: Dynamic Batching**
+
+**Architecture:**
+```
+FastAPI → Batch Collector (100-200ms) → Batch Inference → Split Results
+```
+
+**How it works:**
+- Collect requests for 100-200ms window
+- Process multiple texts in single forward pass
+- F5-TTS processes batch together on GPU
+- Split and return individual results
+
+**Pros:**
+- ✅ Most GPU-efficient approach
+- ✅ 2-3x throughput improvement
+- ✅ Best for high concurrent load
+- ✅ Optimal VRAM utilization
+
+**Cons:**
+- ❌ Adds latency (100-200ms wait for batch)
+- ❌ Requires F5-TTS batch inference support
+- ❌ Very complex implementation
+- ❌ May not work with current F5-TTS API
+- ❌ 8-12 hours implementation time
+- ❌ Difficult to debug
+
+**Expected Performance:**
+- 5-10 requests per batch
+- Throughput: 30-50 requests/minute
+- With 10 concurrent users:
+  - Average wait: ~8 seconds (including batch wait)
+  - Very consistent timing
+
+**VRAM Usage:** 4-6GB
+
+**Implementation Complexity:** Very High (8-12 hours)
+
+---
+
+### Detailed Comparison Table
+
+| Metric | Option 1: Queue | Option 2: Ray | Option 3: Celery | Option 4: Batching |
+|--------|-----------------|---------------|------------------|-------------------|
+| **Implementation Time** | 1 hour | 4-6 hours | 6-8 hours | 8-12 hours |
+| **VRAM Usage** | 4GB | 8-12GB | 8GB | 4-6GB |
+| **Code Complexity** | Low | Medium | High | Very High |
+| **External Dependencies** | None | Ray | Redis+Celery | Custom |
+| **Concurrent Requests** | 1 | 2-3 | 2 | 5-10 (batched) |
+| **Throughput (req/min)** | 12-20 | 24-40 | 20-30 | 30-50 |
+| **Avg Wait (10 users)** | 15s | 5s | 10s | 8s |
+| **PoC Ready** | ✅ Yes | ⚠️ Overkill | ❌ Too complex | ❌ Too complex |
+| **Production Ready** | ⚠️ Limited | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Debug Difficulty** | Easy | Medium | Hard | Very Hard |
+| **Scalability** | Low | High | High | Medium |
+| **Maintenance** | Easy | Medium | Medium | Hard |
+| **VRAM Fit (16GB GPU)** | ✅ Yes | ⚠️ Tight | ⚠️ Tight | ✅ Yes |
+
+---
+
+### Recommendation: Phased Approach
+
+#### **Phase 1: Start with Option 1 (Week 1) ✅**
+
+Implement simple AsyncIO queue for immediate PoC validation.
+
+**Why:**
+1. Get working PoC in 1 hour
+2. Validate user experience with real users
+3. Measure actual load patterns
+4. Leaves VRAM headroom for monitoring
+5. Easy to debug and iterate
+
+**Performance Estimate:**
+```
+Scenario: 10 users request TTS simultaneously
+
+User 1:  Wait 0s  → Process 3s → Total: 3s
+User 2:  Wait 3s  → Process 3s → Total: 6s
+User 3:  Wait 6s  → Process 3s → Total: 9s
+User 4:  Wait 9s  → Process 3s → Total: 12s
+User 5:  Wait 12s → Process 3s → Total: 15s
+User 6:  Wait 15s → Process 3s → Total: 18s
+User 7:  Wait 18s → Process 3s → Total: 21s
+User 8:  Wait 21s → Process 3s → Total: 24s
+User 9:  Wait 24s → Process 3s → Total: 27s
+User 10: Wait 27s → Process 3s → Total: 30s
+
+Average wait time: 15 seconds
+Acceptable with SSE progress indicators!
+```
+
+**Key Features:**
+- AsyncIO queue with semaphore
+- Model preloaded once at startup
+- Reference audio caching
+- Real-time progress via SSE
+- Queue position visibility
+
+---
+
+**Upgrade Paths:**
+
+1. **If wait time > 15s + VRAM < 8GB:**
+   - Upgrade to Ray Serve with 2 replicas
+   - Implementation: 4 hours
+   - Result: 2x throughput, 50% wait time
+
+2. **If wait time > 10s + VRAM < 10GB:**
+   - Add second model instance with simple lock
+   - Implementation: 2 hours
+   - Result: 1.8x throughput
+
+3. **If wait time acceptable but want optimization:**
+   - Optimize model loading/inference
+   - Implement smarter caching
+   - Fine-tune batch sizes
+---
+
+### Code Architecture Preview
+
+#### Option 1 Implementation (Recommended Start)
+
+```python
+import asyncio
+from collections import deque
+
+# Global state
+inference_semaphore = asyncio.Semaphore(1)  # 1 concurrent inference
+request_queue = asyncio.Queue(maxsize=50)   # Max 50 queued
+ref_audio_cache = {}                        # Cache preprocessed refs
+
+# Preload model at startup (once)
+F5TTS_model = load_model(...)
+vocoder = load_vocoder(...)
+
+async def run_inference(text: str, voice_id: str, speed: float):
+    """Process one request with queue management"""
+    
+    # Wait for available slot
+    async with inference_semaphore:
+        # Get cached reference audio
+        ref_audio, ref_text = ref_audio_cache[voice_id]
+        
+        # Run inference in thread pool
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            _sync_inference,
+            ref_audio, ref_text, text, speed
+        )
+        
+        return result
+
+def _sync_inference(ref_audio, ref_text, text, speed):
+    """Actual inference (blocking)"""
+    with torch.inference_mode():
+        return infer_process(
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            gen_text=text,
+            model_obj=F5TTS_model,
+            vocoder=vocoder,
+            speed=speed
+        )
+
+@app.post("/synthesize")
+async def synthesize(request: TTSRequest):
+    """API endpoint with automatic queuing"""
+    
+    # Check queue capacity
+    if request_queue.qsize() >= 50:
+        raise HTTPException(503, "Server busy")
+    
+    # Process with concurrency control
+    result = await run_inference(
+        request.text,
+        request.voice,
+        request.speed
+    )
+    
+    return result
+```
+
+**Lines of Code:** ~80 lines  
+**Dependencies:** None (built-in asyncio)  
+**VRAM:** 4GB  
+**Throughput:** 12-20 req/min
+
+---
+
+### Performance Benchmarks
+
+#### Option 1: Queue (Target for PoC)
+```
+Load: 10 concurrent users
+├── User 1:  3s (no wait)
+├── User 2:  6s (wait 3s)
+├── User 3:  9s (wait 6s)
+├── User 4: 12s (wait 9s)
+├── User 5: 15s (wait 12s)
+├── User 6: 18s (wait 15s)
+├── User 7: 21s (wait 18s)
+├── User 8: 24s (wait 21s)
+├── User 9: 27s (wait 24s)
+└── User 10: 30s (wait 27s)
+
+Avg wait: 15s
+P95 wait: 27s
+VRAM: 4GB
+```
+
+#### Option 2: Ray Serve (If needed)
+```
+Load: 10 concurrent users (2 replicas)
+├── Batch 1 (2 users): 3s (no wait)
+├── Batch 2 (2 users): 6s (wait 3s)
+├── Batch 3 (2 users): 9s (wait 6s)
+├── Batch 4 (2 users): 12s (wait 9s)
+└── Batch 5 (2 users): 15s (wait 12s)
+
+Avg wait: 6s
+P95 wait: 12s
+VRAM: 8GB (2 replicas × 4GB)
+```
+
+---
+
+### Success Criteria
+
+#### Phase 1 (PoC) Success Metrics:
+- ✅ 10 concurrent users handled without crashes
+- ✅ Average wait time < 20 seconds
+- ✅ 95% success rate (< 5% errors)
+- ✅ VRAM usage < 6GB (leaves headroom)
+- ✅ User can see queue position and progress
+
+#### Phase 2 (Production Ready) Goals:
+- ✅ Average wait time < 10 seconds
+- ✅ 99% success rate
+- ✅ Handle 20+ concurrent users
+- ✅ Graceful degradation under load
+- ✅ Automatic scaling based on metrics
+
+---
+
+### Decision Framework
+
+**When to stay with Option 1:**
+- Average wait time < 15 seconds ✅
+- Peak queue length < 20 users ✅
+- User satisfaction acceptable ✅
+- VRAM comfortable (< 8GB) ✅
+
+**When to upgrade to Option 2 (Ray):**
+- Average wait time > 15 seconds consistently ⚠️
+- Peak queue length > 20 users ⚠️
+- VRAM headroom available (< 10GB used) ✅
+- Budget for 4-6 hours development time ✅
+
+**When to consider Option 3 (Celery):**
+- Need job persistence across restarts ⚠️
+- Want to scale to multiple machines ⚠️
+- Have Redis infrastructure already ✅
+- Need complex workflow orchestration ⚠️
+
+**When to implement Option 4 (Batching):**
+- Consistently high concurrent load (20+ users) ⚠️
+- F5-TTS supports batch inference ⚠️
+- Need maximum throughput optimization ⚠️
+- Have time for complex implementation (8-12 hours) ⚠️
+
+---
+
 ## Testing
 - Unit tests for each endpoint
 - Integration tests for full workflows
