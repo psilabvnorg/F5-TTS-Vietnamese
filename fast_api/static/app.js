@@ -28,11 +28,16 @@
     loadingModal.classList.add('hidden');
   }
 
-  function updateProgress(percent, text = '') {
+  function updateProgress(percent, text = '', translationKey = '') {
     progressPercent.textContent = `${Math.round(percent)}%`;
     progressBar.style.width = `${percent}%`;
     if (text) {
       progressText.textContent = text;
+      if (translationKey) {
+        progressText.setAttribute('data-i18n', translationKey);
+      } else {
+        progressText.removeAttribute('data-i18n');
+      }
     }
   }
 
@@ -52,7 +57,7 @@
     // Show completion message
     progressPercent.textContent = '✓';
     progressPercent.classList.add('text-success');
-    progressText.textContent = 'Đã hoàn thành tạo file, kiểm tra ở phần Kết quả bên dưới.';
+    progressText.textContent = translate('completed');
     
     // Show OK button
     okBtn.classList.remove('hidden');
@@ -72,7 +77,7 @@
     progressPercent.classList.remove('text-success');
     okBtn.classList.add('hidden');
     
-    updateProgress(0, 'Đang khởi tạo...');
+    updateProgress(0, translate('initializing'), 'initializing');
   }
 
   async function checkHealth() {
@@ -80,12 +85,12 @@
       const res = await fetch('/healthz');
       if (res.ok) {
         const data = await res.json();
-        statusEl.textContent = `API status: online (v${data.version || '1.0.0'})`;
+        statusEl.textContent = `${translate('apiStatusOnline')} (v${data.version || '1.0.0'})`;
       } else {
-        statusEl.textContent = 'API status: offline';
+        statusEl.textContent = translate('apiStatusOffline');
       }
     } catch (e) {
-      statusEl.textContent = 'API status: offline';
+      statusEl.textContent = translate('apiStatusOffline');
     }
   }
 
@@ -134,12 +139,18 @@
           loadVoiceDetail(data.voices[0].id);
         }
       } else {
-        voiceSelect.innerHTML = '<option value="">Không có giọng nào</option>';
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = translate('noVoices');
+        voiceSelect.appendChild(option);
       }
     } catch (e) {
       console.error('Error loading voices:', e);
-      voiceSelect.innerHTML = '<option value="">Lỗi tải giọng</option>';
-      setMessage('Không thể tải danh sách giọng', 'error');
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = translate('errorLoadingVoices');
+      voiceSelect.appendChild(option);
+      setMessage(translate('cannotLoadVoices'), 'error');
     }
   }
 
@@ -151,7 +162,11 @@
       const data = await res.json();
       const samples = data.samples || [];
       if (samples.length === 0) {
-        samplesEl.innerHTML = '<p class="text-center opacity-50">Chưa có mẫu audio nào</p>';
+        const p = document.createElement('p');
+        p.className = 'text-center opacity-50';
+        p.setAttribute('data-i18n', 'noSamples');
+        p.textContent = translate('noSamples');
+        samplesEl.appendChild(p);
         return;
       }
       samples.forEach(item => {
@@ -177,7 +192,11 @@
       });
     } catch (e) {
       console.error('Error loading samples:', e);
-      samplesEl.innerHTML = '<p class="text-center text-error">Lỗi tải mẫu audio</p>';
+      const p = document.createElement('p');
+      p.className = 'text-center text-error';
+      p.setAttribute('data-i18n', 'errorLoadingSamples');
+      p.textContent = translate('errorLoadingSamples');
+      samplesEl.appendChild(p);
     }
   }
 
@@ -203,7 +222,8 @@
       // Update voice info display
       voiceNameEl.textContent = voice.name;
       voiceDescEl.textContent = voice.description;
-      voiceMetaEl.textContent = `${voice.language.toUpperCase()} • ${voice.gender === 'male' ? 'Nam' : 'Nữ'}`;
+      const genderText = voice.gender === 'male' ? translate('male') : translate('female');
+      voiceMetaEl.textContent = `${voice.language.toUpperCase()} • ${genderText}`;
       
       voiceInfoEl.classList.remove('hidden');
     } catch (e) {
@@ -217,17 +237,24 @@
     loadVoiceDetail(e.target.value);
   });
 
-  // Character counter
+  // Character counter and warning
   const textInput = document.getElementById('text-input');
   const charCount = document.getElementById('char-count');
+  const charWarning = document.getElementById('char-warning');
+  const charWarningText = document.getElementById('char-warning-text');
   
   textInput.addEventListener('input', () => {
     const len = textInput.value.length;
-    charCount.textContent = `${len} / 5000`;
-    if (len > 5000) {
+    charCount.textContent = `${len} / 500`;
+    
+    if (len > 500) {
       charCount.classList.add('text-error', 'font-semibold');
+      charWarning.classList.remove('hidden');
+      // Update warning text with translation
+      charWarningText.textContent = translate('charLimitWarning');
     } else {
       charCount.classList.remove('text-error', 'font-semibold');
+      charWarning.classList.add('hidden');
     }
   });
 
@@ -249,21 +276,17 @@
       const removeSilence = fd.get('remove_silence') === 'on';
 
       if (!text) {
-        setMessage('Vui lòng nhập text.', 'error');
+        setMessage(translate('enterTextError'), 'error');
         generateBtn.disabled = false;
         hideLoadingModal();
         return;
       }
 
-      if (text.length > 5000) {
-        setMessage('Văn bản không được vượt quá 5000 ký tự.', 'error');
-        generateBtn.disabled = false;
-        hideLoadingModal();
-        return;
-      }
+      // Note: We allow text > 500, but only first 500 chars will be used
+      // The warning is already shown in the UI
 
       if (!voiceId) {
-        setMessage('Vui lòng chọn giọng.', 'error');
+        setMessage(translate('selectVoiceError'), 'error');
         generateBtn.disabled = false;
         hideLoadingModal();
         return;
@@ -285,16 +308,27 @@
         try {
           const data = JSON.parse(event.data);
           
-          if (data.error) {
+          if (data.error || data.error_key) {
             eventSource.close();
             hideLoadingModal();
-            setMessage(data.error, 'error');
+            const errorMsg = data.error_key ? translate(data.error_key) : data.error;
+            setMessage(errorMsg, 'error');
             generateBtn.disabled = false;
             return;
           }
           
-          // Update progress with real backend data
-          updateProgress(data.progress, data.status);
+          // Translate status message if status_key is provided
+          let statusText = data.status || '';
+          if (data.status_key) {
+            statusText = translate(data.status_key);
+            // Handle messages with variables like "Generating audio 1/10..."
+            if (data.current && data.total) {
+              statusText = `${statusText} ${data.current}/${data.total}...`;
+            }
+          }
+          
+          // Update progress with translated backend data
+          updateProgress(data.progress, statusText, data.status_key || '');
           
           // If complete, handle audio data
           if (data.progress === 100 && data.audio_data) {
@@ -324,9 +358,9 @@
               resultEl.classList.remove('hidden');
               
               // Show success with metrics
-              let successMsg = 'Tạo audio thành công!';
-              if (data.duration) successMsg += ` • Độ dài: ${data.duration.toFixed(1)}s`;
-              if (data.file_size) successMsg += ` • Kích thước: ${(data.file_size / 1024).toFixed(0)}KB`;
+              let successMsg = translate('successGenerated');
+              if (data.duration) successMsg += ` • ${translate('duration')}: ${data.duration.toFixed(1)}s`;
+              if (data.file_size) successMsg += ` • ${translate('fileSize')}: ${(data.file_size / 1024).toFixed(0)}KB`;
               setMessage(successMsg, 'success');
             };
             
@@ -341,14 +375,14 @@
         console.error('SSE error:', err);
         eventSource.close();
         hideLoadingModal();
-        setMessage('Có lỗi xảy ra khi tạo audio. Vui lòng thử lại.', 'error');
+        setMessage(translate('errorOccurred'), 'error');
         generateBtn.disabled = false;
       };
       
     } catch (err) {
       console.error(err);
       hideLoadingModal();
-      setMessage(err.message || 'Có lỗi xảy ra.', 'error');
+      setMessage(err.message || translate('errorOccurred'), 'error');
       generateBtn.disabled = false;
     }
   });
@@ -356,4 +390,35 @@
   // Init
   checkHealth();
   loadVoices();
+  
+  // Listen for language changes
+  window.addEventListener('languageChanged', () => {
+    // Reload dynamic content with new language
+    checkHealth();
+    loadVoices();
+    
+    // Update placeholder for text input
+    textInput.placeholder = translate('textPlaceholder');
+    
+    // Update warning if visible
+    if (!charWarning.classList.contains('hidden')) {
+      charWarningText.textContent = translate('charLimitWarning');
+    }
+    
+    // Update character count
+    const len = textInput.value.length;
+    charCount.textContent = `${len} / 500`;
+    
+    // Re-translate modal if visible
+    if (!loadingModal.classList.contains('hidden')) {
+      const progressTextEl = document.getElementById('progress-text');
+      const loadingSubtitle = document.getElementById('loading-subtitle');
+      if (progressTextEl && progressTextEl.hasAttribute('data-i18n')) {
+        progressTextEl.textContent = translate(progressTextEl.getAttribute('data-i18n'));
+      }
+      if (loadingSubtitle && loadingSubtitle.hasAttribute('data-i18n')) {
+        loadingSubtitle.textContent = translate(loadingSubtitle.getAttribute('data-i18n'));
+      }
+    }
+  });
 })();

@@ -431,7 +431,7 @@ async def tts_generate_audio(
         """Stream progress updates via SSE"""
         try:
             # Send initial progress
-            yield f"data: {json.dumps({'progress': 0, 'status': 'Đang khởi tạo...'})}\n\n"
+            yield f"data: {json.dumps({'progress': 0, 'status_key': 'initializing'})}\n\n"
             
             # Start subprocess
             process = await asyncio.create_subprocess_exec(
@@ -457,7 +457,7 @@ async def tts_generate_audio(
                 # Look for "gen_text" lines
                 if 'gen_text' in line_text:
                     progress = min(progress + 5, 30)
-                    yield f"data: {json.dumps({'progress': progress, 'status': 'Đang xử lý văn bản...'})}\n\n"
+                    yield f"data: {json.dumps({'progress': progress, 'status_key': 'processingText'})}\n\n"
                 
                 # Look for batch progress "X/Y"
                 batch_match = re.search(r'(\d+)/(\d+)\s+\[', line_text)
@@ -468,8 +468,7 @@ async def tts_generate_audio(
                     batch_count = current
                     # Map batch progress to 30-90%
                     progress = 30 + int((current / total) * 60)
-                    status_msg = f'Đang tạo audio {current}/{total}...'
-                    yield f"data: {json.dumps({'progress': progress, 'status': status_msg})}\n\n"
+                    yield f"data: {json.dumps({'progress': progress, 'status_key': 'generatingAudio', 'current': current, 'total': total})}\n\n"
                 
                 # Look for percentage in progress bar
                 percent_match = re.search(r'(\d+)%', line_text)
@@ -479,19 +478,18 @@ async def tts_generate_audio(
                     base_progress = 30 + int(((batch_count - 1) / total_batches) * 60)
                     progress = base_progress + int((batch_progress / 100) * (60 / total_batches))
                     progress = min(progress, 90)
-                    status_msg = f'Đang tạo kết quả  {batch_count}/{total_batches}...'
-                    yield f"data: {json.dumps({'progress': progress, 'status': status_msg})}\n\n"
+                    yield f"data: {json.dumps({'progress': progress, 'status_key': 'generatingResult', 'current': batch_count, 'total': total_batches})}\n\n"
             
             # Wait for process to complete
             await process.wait()
             
             if process.returncode != 0:
-                yield f"data: {json.dumps({'progress': 0, 'status': 'Lỗi', 'error': 'Tạo audio thất bại'})}\n\n"
+                yield f"data: {json.dumps({'progress': 0, 'status_key': 'error', 'error_key': 'generationFailed'})}\n\n"
                 return
             
             # Check if output file exists
             if output_path.exists():
-                yield f"data: {json.dumps({'progress': 95, 'status': 'Đang hoàn thiện kết quả...'})}\n\n"
+                yield f"data: {json.dumps({'progress': 95, 'status_key': 'finalizingResult'})}\n\n"
                 await asyncio.sleep(0.2)
                 
                 # Read audio file
@@ -507,7 +505,7 @@ async def tts_generate_audio(
                 
                 result_data = {
                     'progress': 100,
-                    'status': 'Hoàn thành!',
+                    'status_key': 'complete',
                     'audio_data': audio_b64,
                     'filename': output_file,
                     'duration': audio_duration,
@@ -515,10 +513,10 @@ async def tts_generate_audio(
                 }
                 yield f"data: {json.dumps(result_data)}\n\n"
             else:
-                yield f"data: {json.dumps({'progress': 0, 'status': 'Lỗi', 'error': 'File đầu ra không được tạo'})}\n\n"
+                yield f"data: {json.dumps({'progress': 0, 'status_key': 'error', 'error_key': 'outputFileNotCreated'})}\n\n"
                 
         except Exception as e:
-            yield f"data: {json.dumps({'progress': 0, 'status': 'Lỗi', 'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'progress': 0, 'status_key': 'error', 'error': str(e)})}\n\n"
     
     return StreamingResponse(generate_progress(), media_type="text/event-stream")
 

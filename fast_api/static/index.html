@@ -7,17 +7,38 @@
   <link rel="icon" href="/static/images/psi-lab.jpg" type="image/jpeg" />
   <link href="https://cdn.jsdelivr.net/npm/daisyui@4.4.19/dist/full.min.css" rel="stylesheet" type="text/css" />
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/static/translations.js"></script>
 </head>
 <body class="bg-base-200">
   <!-- Header -->
   <header class="navbar bg-base-100 shadow-lg">
     <div class="flex-1">
       <img src="/static/images/psi-lab.jpg" alt="PSI Lab" class="h-10 w-10 ml-4 mr-3 rounded-lg" />
-      <h1 class="text-2xl font-bold text-primary">F5-TTS Voice Cloning</h1>
+      <h1 class="text-2xl font-bold text-primary" data-i18n="appTitle">F5-TTS Voice Cloning</h1>
     </div>
-    <div class="flex-none">
+    <div class="flex-none gap-2">
+      <!-- Language Toggle -->
+      <div class="btn-group">
+        <button id="lang-vn" class="btn btn-sm btn-primary" onclick="switchLanguage('vi')">
+          <svg class="w-5 h-4" viewBox="0 0 30 20" fill="none">
+            <rect width="30" height="20" fill="#DA251D"/>
+            <path d="M15 4L16.854 9.764H22.929L17.537 13.472L19.391 19.236L15 15.528L10.609 19.236L12.463 13.472L7.071 9.764H13.146L15 4Z" fill="#FFCD00"/>
+          </svg>
+          VN
+        </button>
+        <button id="lang-en" class="btn btn-sm btn-ghost" onclick="switchLanguage('en')">
+          <svg class="w-5 h-4" viewBox="0 0 30 20" fill="none">
+            <rect width="30" height="20" fill="#012169"/>
+            <path d="M0 0L30 20M30 0L0 20" stroke="white" stroke-width="4"/>
+            <path d="M0 0L30 20M30 0L0 20" stroke="#C8102E" stroke-width="2.5"/>
+            <path d="M15 0V20M0 10H30" stroke="white" stroke-width="6"/>
+            <path d="M15 0V20M0 10H30" stroke="#C8102E" stroke-width="4"/>
+          </svg>
+          EN
+        </button>
+      </div>
       <div class="badge badge-success gap-2 mr-4">
-        <span id="status">API: unknown</span>
+        <span id="status" data-i18n="apiStatus">API: unknown</span>
       </div>
     </div>
   </header>
@@ -28,17 +49,17 @@
       <div class="card-body">
         <h2 class="card-title text-primary mb-4">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
-          Generate Audio
+          <span data-i18n="generateAudio">Generate Audio</span>
         </h2>
         
         <form id="tts-form" class="space-y-4">
           <!-- Voice Selection -->
           <div class="form-control w-full">
             <label class="label" for="voice-select">
-              <span class="label-text font-semibold">Chọn giọng (voice)</span>
+              <span class="label-text font-semibold" data-i18n="selectVoice">Chọn giọng (voice)</span>
             </label>
             <select id="voice-select" name="voice_id" class="select select-bordered select-primary w-full" required>
-              <option value="">Đang tải...</option>
+              <option value="" data-i18n="loading">Đang tải...</option>
             </select>
           </div>
 
@@ -57,33 +78,39 @@
           <!-- Text Input -->
           <div class="form-control w-full">
             <label class="label" for="text-input">
-              <span class="label-text font-semibold">Nhập đoạn văn bản</span>
-              <span class="label-text-alt" id="char-count">0 / 5000</span>
+              <span class="label-text font-semibold" data-i18n="enterText">Nhập đoạn văn bản</span>
+              <span class="label-text-alt" id="char-count">0 / 500</span>
             </label>
             <textarea 
               id="text-input" 
               name="text" 
               rows="5" 
               minlength="1" 
-              maxlength="5000" 
+              data-i18n-placeholder="textPlaceholder"
               placeholder="Nhập text cần clone giọng..." 
               class="textarea textarea-bordered textarea-primary h-32" 
               required
             ></textarea>
+            <div id="char-warning" class="hidden mt-2 alert alert-warning shadow-lg">
+              <div>
+                <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current flex-shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                <span id="char-warning-text" data-i18n="charLimitWarning">Văn bản của bạn vượt quá 500 ký tự. Chỉ 500 ký tự đầu tiên sẽ được sử dụng để tạo giọng nói. Bạn cần đăng nhập để có thể tạo với văn bản dài hơn.</span>
+              </div>
+            </div>
           </div>
 
           <!-- Advanced Options -->
           <div class="collapse collapse-arrow bg-base-200">
             <input type="checkbox" /> 
-            <div class="collapse-title font-semibold">
+            <div class="collapse-title font-semibold" data-i18n="advancedOptions">
               ⚙️ Tùy chọn nâng cao
             </div>
             <div class="collapse-content space-y-4">
               <!-- Speed -->
               <div class="form-control w-full">
                 <label class="label" for="speed-input">
-                  <span class="label-text">Tốc độ (0.5 - 2.0)</span>
-                  <span class="label-text-alt">Default: 1.0</span>
+                  <span class="label-text" data-i18n="speed">Tốc độ (0.5 - 2.0)</span>
+                  <span class="label-text-alt"><span data-i18n="default">Default</span>: 1.0</span>
                 </label>
                 <input 
                   id="speed-input" 
@@ -100,8 +127,8 @@
               <!-- CFG Strength -->
               <div class="form-control w-full">
                 <label class="label" for="cfg-input">
-                  <span class="label-text">CFG Strength (1.0 - 5.0)</span>
-                  <span class="label-text-alt">Default: 2.0</span>
+                  <span class="label-text" data-i18n="cfgStrength">CFG Strength (1.0 - 5.0)</span>
+                  <span class="label-text-alt"><span data-i18n="default">Default</span>: 2.0</span>
                 </label>
                 <input 
                   id="cfg-input" 
@@ -118,7 +145,7 @@
               <!-- NFE Steps -->
               <div class="form-control w-full">
                 <label class="label" for="nfe-input">
-                  <span class="label-text">NFE Steps</span>
+                  <span class="label-text" data-i18n="nfeSteps">NFE Steps</span>
                 </label>
                 <select id="nfe-input" name="nfe_step" class="select select-bordered w-full">
                   <option value="16">16</option>
@@ -131,7 +158,7 @@
               <div class="form-control">
                 <label class="label cursor-pointer justify-start gap-3">
                   <input id="silence-input" name="remove_silence" type="checkbox" class="checkbox checkbox-primary" />
-                  <span class="label-text">Loại bỏ khoảng lặng</span>
+                  <span class="label-text" data-i18n="removeSilence">Loại bỏ khoảng lặng</span>
                 </label>
               </div>
             </div>
@@ -141,20 +168,20 @@
           <div class="flex gap-3 pt-2">
             <button type="submit" id="generate-btn" class="btn btn-primary flex-1">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" /></svg>
-              Generate WAV
+              <span data-i18n="generateWav">Tạo file giọng nói (WAV)</span>
             </button>
-            <button type="reset" class="btn btn-ghost">Reset</button>
+            <button type="reset" class="btn btn-ghost" data-i18n="reset">Đặt lại</button>
           </div>
         </form>
 
         <!-- Result Section -->
         <div id="result" class="mt-6 hidden">
           <div class="divider"></div>
-          <h3 class="font-bold text-lg mb-3">✅ Kết quả</h3>
+          <h3 class="font-bold text-lg mb-3" data-i18n="result">✅ Kết quả</h3>
           <audio id="audio-player" controls class="w-full mb-3"></audio>
           <a id="download-link" href="#" download="result.wav" class="btn btn-success btn-block">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
-            Tải xuống WAV
+            <span data-i18n="downloadWav">Tải xuống file giọng nói (WAV)</span>
           </a>
         </div>
 
@@ -168,7 +195,7 @@
       <div class="card-body">
         <h2 class="card-title text-primary mb-4">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" /></svg>
-          Nghe thử mẫu
+          <span data-i18n="listenSamples">Nghe thử mẫu</span>
         </h2>
         <div id="samples" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
       </div>
@@ -227,7 +254,7 @@
           <!-- Progress Percentage -->
           <div class="mb-4">
             <div class="text-5xl font-bold text-primary" id="progress-percent">0%</div>
-            <div class="text-sm text-base-content opacity-70 mt-2" id="progress-text">Đang khởi tạo...</div>
+            <div class="text-sm text-base-content opacity-70 mt-2" id="progress-text" data-i18n="initializing"></div>
           </div>
           
           <!-- Progress Bar -->
@@ -236,11 +263,11 @@
           </div>
           
           <!-- Status Text -->
-          <p class="text-sm mt-4 text-base-content opacity-60" id="loading-subtitle">Vui lòng chờ trong giây lát...</p>
+          <p class="text-sm mt-4 text-base-content opacity-60" id="loading-subtitle" data-i18n="pleaseWait"></p>
           
           <!-- OK Button (hidden by default) -->
           <button id="modal-ok-btn" class="btn btn-primary btn-wide mt-6 hidden" onclick="document.getElementById('loading-modal').classList.add('hidden')">
-            OK
+            <span data-i18n="ok">OK</span>
           </button>
         </div>
       </div>
