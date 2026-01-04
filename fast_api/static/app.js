@@ -84,7 +84,7 @@
 
   async function checkHealth() {
     try {
-      const res = await fetch('/healthz');
+      const res = await fetch('/api/v1/health/');
       if (res.ok) {
         const data = await res.json();
         statusEl.textContent = `${translate('apiStatusOnline')} (v${data.version || '1.0.0'})`;
@@ -116,7 +116,7 @@
 
   async function loadVoices() {
     try {
-      const res = await fetch('/voices');
+      const res = await fetch('/api/v1/voices/');
       if (!res.ok) {
         throw new Error('Failed to load voices');
       }
@@ -159,7 +159,7 @@
   async function loadSamplesFromBackend() {
     samplesEl.innerHTML = '';
     try {
-      const res = await fetch('/samples');
+      const res = await fetch('/api/v1/samples');
       if (!res.ok) throw new Error('Failed to load samples');
       const data = await res.json();
       const samples = data.samples || [];
@@ -214,7 +214,7 @@
     }
 
     try {
-      const res = await fetch(`/voices/${voiceId}`);
+      const res = await fetch(`/api/v1/voices/${voiceId}`);
       if (!res.ok) {
         throw new Error('Failed to load voice details');
       }
@@ -304,7 +304,7 @@
       params.append('remove_silence', removeSilence);
 
       // Use Server-Sent Events for real-time progress
-      const eventSource = new EventSource(`/tts/generate-audio?${params.toString()}`);
+      const eventSource = new EventSource(`/api/v1/tts/generate-audio?${params.toString()}`);
       
       eventSource.onmessage = async (event) => {
         try {
