@@ -6,3 +6,5 @@
 venv/
 model/
 output/
+fast_api/config/__pycache__
+fast_api/middleware/__pycache__

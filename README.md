@@ -72,3 +72,9 @@ pip install .
 
 ### API Server
 Folder `fast_api/` chứa script để tạo API cho server
+
+### Cách tạo public URL dến localhost:
+- Khởi động project: python fast_api/main.py (Ví dụ được url: http://localhost:8000)
+- Chạy câu lệnh ở terminal khác: cloudflared tunnel --url http://localhost:8000
+- Kết quả thu được 1 URL ngẫu nhiên (Ví dụ: https://liquid-gravity-epinions-pine.trycloudflare.com)
+- Mỗi lần chạy lại sẽ ra 1 URL khác nhau.
