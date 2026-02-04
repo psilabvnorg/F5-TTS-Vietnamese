@@ -1,10 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Data and training directories
 /data/your_dataset/
 /data/your_training_dataset/
 /data/your_training_dataset_non_preprocessed/
 /ckpts/your_training_dataset/
 /preprocess
+
+# Environment and output
 venv/
 model/
 output/
-fast_api/config/__pycache__
-fast_api/middleware/__pycache__
