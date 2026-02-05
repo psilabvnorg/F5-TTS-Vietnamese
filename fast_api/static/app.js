@@ -18,6 +18,8 @@
   const progressPercent = document.getElementById('progress-percent');
   const progressBar = document.getElementById('progress-bar');
   const progressText = document.getElementById('progress-text');
+  // Track remaining rate limit across SSE lifecycle
+  let remainingLimit = null;
 
   function showLoadingModal() {
     resetLoadingModal();
@@ -82,7 +84,7 @@
 
   async function checkHealth() {
     try {
-      const res = await fetch('/healthz');
+      const res = await fetch('/api/v1/health/');
       if (res.ok) {
         const data = await res.json();
         statusEl.textContent = `${translate('apiStatusOnline')} (v${data.version || '1.0.0'})`;
@@ -114,7 +116,7 @@
 
   async function loadVoices() {
     try {
-      const res = await fetch('/voices');
+      const res = await fetch('/api/v1/voices/');
       if (!res.ok) {
         throw new Error('Failed to load voices');
       }
@@ -157,7 +159,7 @@
   async function loadSamplesFromBackend() {
     samplesEl.innerHTML = '';
     try {
-      const res = await fetch('/samples');
+      const res = await fetch('/api/v1/samples');
       if (!res.ok) throw new Error('Failed to load samples');
       const data = await res.json();
       const samples = data.samples || [];
@@ -212,7 +214,7 @@
     }
 
     try {
-      const res = await fetch(`/voices/${voiceId}`);
+      const res = await fetch(`/api/v1/voices/${voiceId}`);
       if (!res.ok) {
         throw new Error('Failed to load voice details');
       }
@@ -302,7 +304,7 @@
       params.append('remove_silence', removeSilence);
 
       // Use Server-Sent Events for real-time progress
-      const eventSource = new EventSource(`/tts/generate-audio?${params.toString()}`);
+      const eventSource = new EventSource(`/api/v1/tts/generate-audio?${params.toString()}`);
       
       eventSource.onmessage = async (event) => {
         try {
@@ -316,6 +318,25 @@
             generateBtn.disabled = false;
             return;
           }
+
+          // // Check rate limit info from initial payload
+          // if (data.rate_limit && typeof data.rate_limit.remaining !== 'undefined') {
+          //   if (parseInt(data.rate_limit.remaining) <= 0) {
+          //     // Inform user and stop further processing
+          //     eventSource.close();
+          //     hideLoadingModal();
+          //     setMessage('Số lượt tạo audio của bạn đã quá 5 lần. Hãy login để có thể tạo thêm file audio.', 'error');
+          //     generateBtn.disabled = false;
+          //     return;
+          //   }
+          //   // Store remaining limit for later display in completion message
+          //   remainingLimit = parseInt(data.rate_limit.remaining);
+          //   // Inform user about remaining limit if still available
+          //   const remaining_limit = parseInt(data.rate_limit.remaining);
+          //   if (remaining_limit > 0) {
+          //     setMessage(`Số lượt tạo audio của bạn còn ${remaining_limit}`, 'info');
+          //   }
+          // }
           
           // Translate status message if status_key is provided
           let statusText = data.status || '';
@@ -330,21 +351,13 @@
           // Update progress with translated backend data
           updateProgress(data.progress, statusText, data.status_key || '');
           
-          // If complete, handle audio data
-          if (data.progress === 100 && data.audio_data) {
+          // If complete, handle audio URL
+          if (data.progress === 100 && data.audio_url) {
             eventSource.close();
             
-            // Decode base64 audio
-            const audioBytes = atob(data.audio_data);
-            const audioArray = new Uint8Array(audioBytes.length);
-            for (let i = 0; i < audioBytes.length; i++) {
-              audioArray[i] = audioBytes.charCodeAt(i);
-            }
-            const blob = new Blob([audioArray], { type: 'audio/wav' });
-            const url = URL.createObjectURL(blob);
-            
-            audioEl.src = url;
-            downloadEl.href = url;
+            // Use the audio URL directly from backend
+            audioEl.src = data.audio_url;
+            downloadEl.href = data.audio_url;
             downloadEl.download = data.filename || 'output.wav';
             
             // Show completion state with OK button
